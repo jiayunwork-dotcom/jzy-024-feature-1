@@ -1,0 +1,11 @@
+services:
+  margin-service:
+    build: .
+    image: open-loop-margin:latest
+    container_name: open-loop-margin
+    ports:
+      - "8000:8000"
+    volumes:
+      # 对象档以本地文件持久化，容器重启后档还在
+      - ./data/plants:/data/plants
+    restart: unless-stopped
