@@ -5,6 +5,5 @@ __pycache__
 data
 .git
 *.md
-tests
 Dockerfile
 docker-compose.yml

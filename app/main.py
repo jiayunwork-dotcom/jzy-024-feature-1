@@ -1,9 +1,13 @@
-"""FastAPI 入口：对象档管理 + 开环扫频裕度读数。
+"""FastAPI 入口：对象档管理 + 开环扫频裕度读数 + 参数族鲁棒裕度分析。
 
 启动时载入一套「二阶环节串联一个积分器」的对象档：
     G0(s) = 10 / [ s (s+1) (s+10) ]
 其幅值穿越约 0.78 rad/s、相位裕度约 47°（几十度量级、为正），
 ω_π = √10 rad/s，GM = 11（约 20.8 dB），穿越附近的幅相可手算核对。
+
+鲁棒分析（POST /api/robust）在对象描述之外再收一份不确定性说明，
+在整个参数族上求最坏相位裕度 / 最坏幅值裕度并判定鲁棒稳定性；
+它属于一次性读数：不建流水、不落盘，持久化的仍只是对象档本身。
 """
 
 from __future__ import annotations
@@ -19,7 +23,9 @@ from .archive import PlantArchive
 from .errors import ServiceError
 from .frf import TransferFunction
 from .margins import analyze, to_payload
-from .models import PlantUpsertRequest, SweepRequest
+from .models import PlantUpsertRequest, RobustRequest, SweepRequest
+from .robust import robust_analyze, to_robust_payload
+from .uncertainty import PlantFamily, validate_uncertainty
 from .validation import validate_grid, validate_plant
 
 PLANT_DIR = os.environ.get("PLANT_DIR", os.path.join(os.getcwd(), "data", "plants"))
@@ -47,8 +53,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="开环频域稳定裕度服务",
-    description="对象档管理 + 对数网格扫频，返回相位裕度/幅值裕度。范围限定开环频域裕度。",
-    version="1.0.0",
+    description="对象档管理 + 对数网格扫频，返回相位裕度/幅值裕度；"
+                "并支持在参数不确定族上求最坏情况裕度与鲁棒稳定判定。范围限定开环频域裕度。",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -77,6 +84,7 @@ def root() -> dict[str, Any]:
             "GET  /api/plants/{name}",
             "DELETE /api/plants/{name}",
             "POST /api/sweep",
+            "POST /api/robust",
         ],
     }
 
@@ -141,3 +149,26 @@ def sweep(body: SweepRequest) -> dict[str, Any]:
         "L": plant.L,
     }
     return payload
+
+
+@app.post("/api/robust")
+def robust(body: RobustRequest) -> dict[str, Any]:
+    # 1) 对象：点名字调档，或当次内联。鲁棒分析只读档，不改档、不落盘。
+    spec = app.state.archive.get_spec(body.plant) if isinstance(body.plant, str) else body.plant
+
+    # 2) 不确定性说明：区间合法性 + 极点定位，非法当场拒绝，不给任何读数。
+    unc = validate_uncertainty(
+        body.uncertainty.model_dump() if body.uncertainty is not None else None
+    )
+
+    # 3) 网格：非空、严格递增、全为正（与扫频同一口径）。
+    grid = validate_grid(body.freqs)
+
+    # 4) 参数族构造 + 最坏化搜索：单调维度坍缩到最坏端，极点维度一维搜索，
+    #    每个参数点都复用单点扫频内核。
+    family = PlantFamily(spec, unc)
+    try:
+        result = robust_analyze(family, grid)
+    except ZeroDivisionError as exc:
+        raise ServiceError(f"扫频失败：{exc}")
+    return to_robust_payload(result, family.base, unc)
