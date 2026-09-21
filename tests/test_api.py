@@ -152,3 +152,93 @@ def test_db_consistency_via_http(client):
     body = sweep(client, "startup_plant").json()
     for m, db in zip(body["bode"]["magnitude"], body["bode"]["magnitude_db"]):
         assert db == 20.0 * math.log10(m)
+
+
+# ---------------------------------------------------------------------------
+# 鲁棒最坏情况裕度：POST /api/robust-margins
+# ---------------------------------------------------------------------------
+
+def robust(client, plant, unc=None, grid=None, **kw):
+    return client.post("/api/robust-margins",
+                       json={"plant": plant, "freqs": grid or GRID,
+                             "uncertainty": unc, **kw})
+
+
+def test_robust_named_plant_degenerate_matches_sweep(client):
+    r = robust(client, "startup_plant").json()
+    s = sweep(client, "startup_plant").json()
+    assert r["worst_phase_margin"]["phase_margin_deg"] == s["phase_margin_deg"]
+    assert r["worst_gain_margin"]["gain_margin"] == s["gain_margin"]
+    assert r["worst_phase_margin"]["gain_crossover"]["omega_c"] == s["gain_crossover"]["omega_c"]
+    assert r["robust_stable"] is True and r["critical_point"]["found"] is False
+    assert r["family"] == {"K": [1.0, 1.0], "L": [0.0, 0.0], "pole": None}
+
+
+def test_robust_inline_plant_and_delay_family(client):
+    spec = {"type": "poly", "num": [10.0], "den": [1.0, 11.0, 10.0, 0.0],
+            "K": 1.0, "L": 0.0}
+    r = robust(client, spec, {"L": [0.0, 0.4]}).json()
+    s = sweep(client, spec, L=0.4).json()
+    assert r["worst_phase_margin"]["phase_margin_deg"] == s["phase_margin_deg"]
+    assert r["worst_phase_margin"]["at"] == {"K": 1.0, "L": 0.4, "pole": None}
+
+
+def test_robust_K_override_and_pole_family_via_http(client):
+    unc = {"pole": {"nominal": -1.0, "range": [-2.0, -0.5]}}
+    r = robust(client, "startup_plant", unc, K=2.0).json()
+    assert r["worst_phase_margin"]["at"]["K"] == 2.0
+    assert r["worst_phase_margin"]["at"]["pole"] == pytest.approx(-0.5, abs=1e-8)
+    # 当次覆盖不改动对象档
+    assert client.get("/api/plants/startup_plant").json()["K"] == 1.0
+
+
+def test_robust_unknown_plant_404(client):
+    assert robust(client, "ghost", {"K": [1, 2]}).status_code == 404
+
+
+def test_robust_bad_interval_rejected_without_reading(client):
+    r = robust(client, "startup_plant", {"K": [3, 1]})
+    assert r.status_code == 400
+    assert "worst_phase_margin" not in r.json()
+    assert "上界" in r.json()["error"]
+    r = robust(client, "startup_plant", {"L": [-1, 1]})
+    assert r.status_code == 400
+    r = robust(client, "startup_plant",
+               {"pole": {"nominal": -1, "range": [-1, 1]}})
+    assert r.status_code == 400 and "右半平面" in r.json()["error"]
+
+
+def test_robust_bad_grid_rejected(client):
+    r = client.post("/api/robust-margins",
+                    json={"plant": "startup_plant", "freqs": [],
+                          "uncertainty": {"K": [1, 2]}})
+    assert r.status_code == 400 and "非空" in r.json()["error"]
+
+
+def test_robust_no_crossover_family_explicit_mark(client):
+    r = robust(client, "startup_plant", {"K": [1e-7, 1e-5]},
+               grid=loggrid(0.01, 10, 401)).json()
+    blk = r["worst_phase_margin"]
+    assert blk["exists"] is False and blk["phase_margin_deg"] is None
+    assert blk["gain_crossover"]["note"] == "全族无有限幅值穿越"
+    assert blk["at"] is None
+    assert r["robust_stable"] is False
+
+
+def test_robust_unstable_family_critical_point(client):
+    r = robust(client, "startup_plant", {"K": [1.0, 12.0]}).json()
+    assert r["robust_stable"] is False
+    c = r["critical_point"]
+    assert c["found"] and c["at"]["K"] == pytest.approx(11.0, abs=1e-6)
+    assert abs(c["phase_margin_deg"]) < 1e-5
+
+
+def test_robust_analysis_is_not_persisted(client):
+    robust(client, "startup_plant", {"K": [1, 3], "L": [0, 0.2]})
+    # 档目录里仍只有对象档本身，没有任何鲁棒分析流水文件
+    files = client.get("/api/plants").json()["plants"]
+    assert [p["name"] for p in files] == ["startup_plant"]
+
+
+def test_robust_listed_in_root(client):
+    assert "POST /api/robust-margins" in client.get("/").json()["endpoints"]

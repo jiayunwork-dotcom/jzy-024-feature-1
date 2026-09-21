@@ -40,3 +40,30 @@ class SweepRequest(BaseModel):
 
 class PlantUpsertRequest(BaseModel):
     spec: dict[str, Any] = Field(..., description="poly 或 zpk 对象描述")
+
+
+class RobustMarginsRequest(BaseModel):
+    # plant: 字符串（点具名档）或对象描述（poly / zpk），当次有效。
+    plant: str | dict[str, Any]
+    freqs: list[float]
+    # 参数族不确定说明：K / L 给 [下界, 上界]；
+    # pole 给 {"nominal": 标称极点, "range": [下界, 上界]}（实轴坐标）。
+    uncertainty: dict[str, Any] | None = None
+    # 仅当次覆盖档内 K、L 的名义值（与 /api/sweep 同一口径）。
+    K: float | None = None
+    L: float | None = None
+
+    @field_validator("freqs")
+    @classmethod
+    def _freqs_finite_robust(cls, v: list[float]) -> list[float]:
+        for w in v:
+            if not isinstance(w, (int, float)) or isinstance(w, bool) or not math.isfinite(w):
+                raise ValueError("频率点必须是有限数")
+        return v
+
+    @field_validator("K", "L")
+    @classmethod
+    def _override_finite_robust(cls, v: float | None) -> float | None:
+        if v is not None and not math.isfinite(v):
+            raise ValueError("K / L 必须是有限数")
+        return v

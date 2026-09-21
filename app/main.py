@@ -19,7 +19,8 @@ from .archive import PlantArchive
 from .errors import ServiceError
 from .frf import TransferFunction
 from .margins import analyze, to_payload
-from .models import PlantUpsertRequest, SweepRequest
+from .models import PlantUpsertRequest, RobustMarginsRequest, SweepRequest
+from .robust import build_uncertainty, robust_analyze, robust_to_payload
 from .validation import validate_grid, validate_plant
 
 PLANT_DIR = os.environ.get("PLANT_DIR", os.path.join(os.getcwd(), "data", "plants"))
@@ -77,6 +78,7 @@ def root() -> dict[str, Any]:
             "GET  /api/plants/{name}",
             "DELETE /api/plants/{name}",
             "POST /api/sweep",
+            "POST /api/robust-margins",
         ],
     }
 
@@ -141,3 +143,31 @@ def sweep(body: SweepRequest) -> dict[str, Any]:
         "L": plant.L,
     }
     return payload
+
+
+def _resolve_plant(body: Any):
+    """点具名档或当次内联对象；K/L 当次覆盖与 /api/sweep 完全同一路径。"""
+
+    if isinstance(body.plant, str):
+        if body.K is not None or body.L is not None:
+            spec = app.state.archive.get_spec(body.plant)
+            return validate_plant(spec, K_override=body.K, L_override=body.L)
+        return app.state.archive.load(body.plant)
+    return validate_plant(body.plant, K_override=body.K, L_override=body.L)
+
+
+@app.post("/api/robust-margins")
+def robust_margins(body: RobustMarginsRequest) -> dict[str, Any]:
+    # 1) 对象解析与网格校验：全部复用现有入参层，口径不另起炉灶。
+    plant = _resolve_plant(body)
+    grid = validate_grid(body.freqs)
+
+    # 2) 不确定说明：区间合法性、极点不越虚轴，在这里当场拒绝。
+    unc = build_uncertainty(body.uncertainty, plant)
+
+    # 3) 参数族最坏化 + 鲁棒稳定判定（内核复用 frf/margins）。
+    try:
+        result = robust_analyze(plant, grid, unc)
+    except ZeroDivisionError as exc:
+        raise ServiceError(f"扫频失败：{exc}")
+    return robust_to_payload(result)

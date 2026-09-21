@@ -1,0 +1,16 @@
+# 容器内跑整套测试：沿用与线上同一个构建出来的镜像，不额外写 Dockerfile。
+#   docker compose -f docker-compose.test.yml up --build --attach tests
+# 挂载源码与测试目录进容器，临时装测试依赖（pytest/httpx），跑完即退；
+# 不起对外端口，不写对象档卷，也不产生任何镜像层之外的产物。
+services:
+  tests:
+    build: .
+    image: open-loop-margin:latest
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements-dev.txt &&
+             python -m pytest -q"
+    volumes:
+      - ./app:/srv/app
+      - ./tests:/srv/tests
+      - ./pytest.ini:/srv/pytest.ini:ro
+      - ./requirements-dev.txt:/srv/requirements-dev.txt:ro
